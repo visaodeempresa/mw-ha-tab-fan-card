@@ -161,7 +161,7 @@ const HASS = {
 };
 const add = (id, dev, nome, extra) => {
   HASS.entities[id] = Object.assign({ device_id: dev }, extra || {});
-  HASS.states[id] = { state: "off", attributes: { friendly_name: nome } };
+  HASS.states[id] = { state: "on", attributes: { friendly_name: nome } };
 };
 for (const [id, nome] of SCENES) add(id, null, nome);
 // tomada Tuya, em português
@@ -297,6 +297,36 @@ ok(!!customElements.get(CARD_TYPE + "-editor"), "editor não registrado");
     const dentro = cfg6.tabs[0].cards[0].cards[2];
     eq(dentro.type, "markdown", "faltou o aviso de que não há botão");
   }
+
+  // --- COMPORTAMENTO NOVO: Reatividade Dinâmica via set hass & Quadrado 1:1 ---
+  const dynamicCard = mk({
+    power_entity: SOCKET, socket_device: TUYA,
+    image: IMG,
+    rainbow_devices: [{ device: "clima1" }],
+    scenes: SCENE_MAP,
+  });
+  await tick(); await tick(); await tick();
+  eq(dynamicCard._child._cfg.tabs.length, 2, "card dinâmico inicia com 2 abas (climatizador + energia)");
+
+  // Desliga a tomada via hass
+  HASS.states[SOCKET].state = "off";
+  dynamicCard.hass = HASS;
+  await tick(); await tick(); await tick();
+  eq(dynamicCard._child._cfg.tabs.length, 1, "card dinâmico reduz abas após desligar tomada (energia oculta)");
+  eq(dynamicCard._child._cfg.tabs[0].cards[1].cards[1].type, "custom:power-button-card", "tomada assume lugar dos botões dinamicamente");
+  const tab1Pbc = dynamicCard._child._cfg.tabs[0].cards[1].cards[1];
+  ok(tab1Pbc.card_mod && /aspect-ratio:\s*1\s*\/\s*1/.test(tab1Pbc.card_mod.style), "tomada da 1ª aba blindada como quadrado perfeito 1:1");
+  eq(dynamicCard._child._cfg.tabs[0].cards.length, 2, "heading ocultado com tomada desligada");
+
+  // Religa a tomada
+  HASS.states[SOCKET].state = "on";
+  dynamicCard.hass = HASS;
+  await tick(); await tick(); await tick();
+  eq(dynamicCard._child._cfg.tabs.length, 2, "card dinâmico restaura abas após religar tomada");
+  eq(dynamicCard._child._cfg.tabs[0].cards[1].cards[1].cards[2].type, "custom:mw-scene-button-card", "botões restaurados dinamicamente");
+  const tab2Pbc = dynamicCard._child._cfg.tabs[1].cards[1].cards[0];
+  eq(tab2Pbc.type, "custom:power-button-card", "tomada presente na aba de energia");
+  ok(tab2Pbc.card_mod && /aspect-ratio:\s*1\s*\/\s*1/.test(tab2Pbc.card_mod.style), "tomada da aba de energia blindada como quadrado perfeito 1:1");
 
   // editor monta sem hass e sem os elementos internos do HA
   const ed = new (customElements.get(CARD_TYPE + "-editor"))();
