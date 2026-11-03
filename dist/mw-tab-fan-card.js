@@ -23,7 +23,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.4.0";
+  const VERSION = "0.5.0";
   /* ------------------------------------------------------------ utilidades */
 
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
@@ -269,6 +269,26 @@
     return (hass && ent && hass.states && hass.states[ent] && hass.states[ent].state) || "off";
   };
 
+  const fanEntity = (hass, cfg) => {
+    if (cfg.fan_entity) return cfg.fan_entity;
+    const dev = cfg.ir_device || cfg.device;
+    const fans = entitiesOfDevice(hass, dev).filter((id) => id.indexOf("fan.") === 0);
+    return fans[0] || "";
+  };
+
+  const fanStatus = (hass, cfg) => {
+    if (!hass || !hass.states) return "unknown";
+    const ent = fanEntity(hass, cfg);
+    if (ent && hass.states[ent]) {
+      return hass.states[ent].state;
+    }
+    const sockEnt = socketEntity(hass, cfg);
+    if (sockEnt && hass.states[sockEnt]) {
+      return (hass.states[sockEnt].state === "off" || hass.states[sockEnt].state === "unavailable" || hass.states[sockEnt].state === "unknown") ? "off" : "on";
+    }
+    return "on";
+  };
+
   // Tuya fala português ("voltagem", "corrente", "potência"); Tapo e o resto do
   // mundo falam inglês ("voltage", "current", "current_power"). Energia
   // acumulada (kWh, "today_energy", "consumo") NÃO é potência: entrar aqui
@@ -394,6 +414,14 @@
     const sockSt = socketState(hass, cfg);
     const isSocketOff = Boolean(sockEnt && (sockSt === "off" || sockSt === "unavailable" || sockSt === "unknown"));
 
+    const fanSt = fanStatus(hass, cfg);
+    const isFanOn = (fanSt === "on");
+    const isOff = isSocketOff || !isFanOn;
+
+    const paperOn = cfg.paper_color_on || (cfg.paper_color && cfg.paper_color !== "grafite-1" ? cfg.paper_color : "orange-7");
+    const paperOff = cfg.paper_color_off || "grafite-1";
+    const paperColor = isOff ? paperOff : paperOn;
+
     if (cfg.rainbow !== false && (cfg.rainbow_devices || []).length) cards.push(rainbowCard(hass, cfg));
 
     if (isSocketOff) {
@@ -490,7 +518,7 @@
     const root = {
       type: "custom:mw-tab-card",
       tabs,
-      paper_color: cfg.paper_color || DEFAULTS.paper_color,
+      paper_color: paperColor,
       shell_color: cfg.shell_color || DEFAULTS.shell_color,
       ...TABS_DEFAULTS,
       ...clean(cfg.tabs_options || {}),
@@ -508,6 +536,7 @@
       this._config = { ...DEFAULTS, ...(config || {}) };
       this._built = null;
       this._lastSockState = null;
+      this._lastFanState = null;
       this._update();
     }
 
@@ -519,15 +548,18 @@
 
       const sockEnt = socketEntity(hass, this._config);
       const sockSt = (sockEnt && hass.states && hass.states[sockEnt]) ? hass.states[sockEnt].state : null;
+      const fanSt = fanStatus(hass, this._config);
 
       const mexeu = !antes
         || antes.entities !== hass.entities
         || antes.devices !== hass.devices
         || antes.areas !== hass.areas
         || Object.keys(antes.states || {}).length !== Object.keys(hass.states || {}).length
-        || sockSt !== this._lastSockState;
+        || sockSt !== this._lastSockState
+        || fanSt !== this._lastFanState;
 
       this._lastSockState = sockSt;
+      this._lastFanState = fanSt;
 
       if (mexeu) this._update(); else if (this._child) {
         this._child.hass = hass;
