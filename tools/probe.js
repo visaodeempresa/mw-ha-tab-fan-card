@@ -210,6 +210,12 @@ ok(!!customElements.get(CARD_TYPE + "-editor"), "editor não registrado");
     await tick();
     eq(card._child && card._child._cfg && card._child._cfg.paper_color, "grafite-1", "papel tomada desligada é grafite-1");
     HASS.states[SOCKET].state = "on";
+    // Teste com potência ativa quando a entidade está off
+    HASS.states[SOCKET_P] = { state: "35.0", attributes: { friendly_name: "Potência" } };
+    card.hass = { ...HASS };
+    await tick();
+    eq(card._child && card._child._cfg && card._child._cfg.paper_color, "orange-7", "potência ativa acima de 5W liga o papel orange-7");
+    HASS.states[SOCKET_P] = { state: "0.0", attributes: { friendly_name: "Potência" } };
     eq(cfg.shell_color, SHELL, "casca padrão");
     eq(cfg.tab_position, "right", "abas à direita");
     eq(cfg.tabs.length, 2, "duas abas");
@@ -332,6 +338,44 @@ ok(!!customElements.get(CARD_TYPE + "-editor"), "editor não registrado");
   const tab2Pbc = dynamicCard._child._cfg.tabs[1].cards[1].cards[0];
   eq(tab2Pbc.type, "custom:power-button-card", "tomada presente na aba de energia");
   ok(tab2Pbc.card_mod && /aspect-ratio:\s*1\s*\/\s*1/.test(tab2Pbc.card_mod.style), "tomada da aba de energia blindada como quadrado perfeito 1:1");
+
+  // --- Teste do painel de potência no rodapé (abaixo do grupo de abas/painel) ---
+  const powerCardTest = mk({
+    power_entity: SOCKET,
+    socket_device: TUYA,
+    scenes: SCENE_MAP,
+  });
+  await tick(); await tick(); await tick();
+  powerCardTest._child.setConfig = (c) => { powerCardTest._child._cfg = c; };
+  powerCardTest._child.shadowRoot = new Node("shadow-root");
+  const shellNode = new Node("ha-card");
+  shellNode._classes.add("shell");
+  powerCardTest._child.shadowRoot.appendChild(shellNode);
+  powerCardTest._child.shadowRoot.querySelector = (sel) => {
+    if (sel === "ha-card.shell") return shellNode;
+    return shellNode.querySelector(sel);
+  };
+
+  HASS.states[SOCKET].state = "on";
+  HASS.states[SOCKET_P] = { state: "65.4", attributes: { unit_of_measurement: "W" } };
+  powerCardTest.hass = HASS;
+  await tick();
+  powerCardTest._updatePowerFooter();
+
+  const ftr = shellNode.querySelector(".mw-power-footer");
+  ok(!!ftr, "painel de potência criado no rodapé da casca");
+  ok(!ftr.innerHTML.includes("POTÊNCIA"), "rótulo POTÊNCIA removido a pedido");
+  ok(ftr.innerHTML.includes("65,4") || ftr.innerHTML.includes("65.4"), "potência ativa exibida no rodapé");
+  ok(ftr.innerHTML.includes("W"), "unidade W exibida no rodapé");
+  eq(ftr.style.display, "flex", "painel de rodapé visível com tomada ligada");
+
+  // Tomada desligada -> painel de rodapé oculto
+  HASS.states[SOCKET].state = "off";
+  powerCardTest.hass = HASS;
+  await tick();
+  powerCardTest._updatePowerFooter();
+  eq(ftr.style.display, "none", "painel de rodapé oculto com tomada desligada");
+  HASS.states[SOCKET].state = "on";
 
   // editor monta sem hass e sem os elementos internos do HA
   const ed = new (customElements.get(CARD_TYPE + "-editor"))();

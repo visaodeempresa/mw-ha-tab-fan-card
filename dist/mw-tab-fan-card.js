@@ -23,7 +23,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.5.0";
+  const VERSION = "0.6.2";
   /* ------------------------------------------------------------ utilidades */
 
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
@@ -319,6 +319,66 @@
     return out;
   };
 
+  const getPowerEntity = (hass, cfg) => {
+    if (!hass || !hass.states) return "";
+    let pEnt = cfg.sensor_potencia;
+    if (!pEnt && cfg.power_options && cfg.power_options.sensor_potencia) {
+      pEnt = cfg.power_options.sensor_potencia;
+    }
+    if (!pEnt) {
+      const sensors = powerSensors(hass, cfg);
+      if (sensors && sensors.sensor_potencia) pEnt = sensors.sensor_potencia;
+    }
+    if (!pEnt && cfg.socket_device && hass.devices && hass.entities) {
+      for (const [id, ent] of Object.entries(hass.entities)) {
+        if (ent.device_id === cfg.socket_device && id.startsWith("sensor.") && (id.includes("potencia") || id.includes("power"))) {
+          pEnt = id;
+          break;
+        }
+      }
+    }
+    if (!pEnt) {
+      const sock = socketEntity(hass, cfg);
+      if (sock) {
+        const base = sock.replace(/^switch\./, "").replace(/_socket_\d+$/, "").replace(/_principal$/, "");
+        const cand = "sensor." + base + "_potencia";
+        if (hass.states[cand]) pEnt = cand;
+      }
+    }
+    return pEnt || "";
+  };
+
+  const STEPS = [["W", "kW"], ["kW", "MW"], ["MW", "GW"]];
+  const fmtPower = (raw, unit, lang) => {
+    let v = Number.parseFloat(raw);
+    if (!Number.isFinite(v)) return { value: String(raw ?? "—"), unit: unit || "W" };
+    let u = unit || "W";
+    const round1 = (x) => Math.round(x * 10) / 10;
+    v = round1(v);
+    for (const [from, to] of STEPS) {
+      if (Math.abs(v) >= 10000 && u.toLowerCase() === from.toLowerCase()) { v = round1(v / 1000); u = to; }
+    }
+    let value;
+    try {
+      value = new Intl.NumberFormat(lang || "pt-BR",
+        { maximumFractionDigits: 1, useGrouping: false }).format(v);
+    } catch (e) {
+      value = String(v);
+    }
+    return { value, unit: u };
+  };
+
+  const powerActive = (hass, cfg, defaultThreshold = 5) => {
+    if (!hass || !hass.states) return false;
+    const sockSt = socketState(hass, cfg);
+    if (sockSt === "off" || sockSt === "unavailable" || sockSt === "unknown") return false;
+    const pEnt = getPowerEntity(hass, cfg);
+    if (!pEnt || !hass.states[pEnt]) return false;
+    const val = parseFloat(hass.states[pEnt].state);
+    const th = Number.isFinite(Number(cfg.power_threshold)) ? Number(cfg.power_threshold) : defaultThreshold;
+    return Number.isFinite(val) && val >= th;
+  };
+
   /* ------------------------------------------------ composição da config */
 
   /** a fileira de botões: o `buttons[]` do YAML manda; senão, os cinco papéis. */
@@ -414,13 +474,14 @@
     const sockSt = socketState(hass, cfg);
     const isSocketOff = Boolean(sockEnt && (sockSt === "off" || sockSt === "unavailable" || sockSt === "unknown"));
 
-    const fanSt = fanStatus(hass, cfg);
-    const isFanOn = (fanSt === "on");
-    const isOff = isSocketOff || !isFanOn;
-
-    const paperOn = cfg.paper_color_on || (cfg.paper_color && cfg.paper_color !== "grafite-1" ? cfg.paper_color : "orange-7");
-    const paperOff = cfg.paper_color_off || "grafite-1";
-    const paperColor = isOff ? paperOff : paperOn;
+    let paperColor = "orange-7";
+    if (!sockEnt || sockSt === "unavailable" || sockSt === "unknown") {
+      paperColor = "#a5123f";
+    } else if (sockSt === "off") {
+      paperColor = "grafite-1";
+    } else {
+      paperColor = "orange-7";
+    }
 
     if (cfg.rainbow !== false && (cfg.rainbow_devices || []).length) cards.push(rainbowCard(hass, cfg));
 
@@ -523,7 +584,9 @@
       ...TABS_DEFAULTS,
       ...clean(cfg.tabs_options || {}),
     };
-    return deepMerge(root, cfg.yaml_override || {});
+    const override = { ...(cfg.yaml_override || {}) };
+    if (isSocketOff) delete override.tabs;
+    return deepMerge(root, override);
   };
 
   /* ------------------------------------------------------------------ CARD */
@@ -537,6 +600,7 @@
       this._built = null;
       this._lastSockState = null;
       this._lastFanState = null;
+      this._lastPowerState = null;
       this._update();
     }
 
@@ -550,6 +614,9 @@
       const sockSt = (sockEnt && hass.states && hass.states[sockEnt]) ? hass.states[sockEnt].state : null;
       const fanSt = fanStatus(hass, this._config);
 
+      const pEnt = getPowerEntity(hass, this._config);
+      const pState = (pEnt && hass.states && hass.states[pEnt]) ? hass.states[pEnt].state : null;
+
       const mexeu = !antes
         || antes.entities !== hass.entities
         || antes.devices !== hass.devices
@@ -558,12 +625,20 @@
         || sockSt !== this._lastSockState
         || fanSt !== this._lastFanState;
 
+      const powerChanged = pState !== this._lastPowerState;
+
       this._lastSockState = sockSt;
       this._lastFanState = fanSt;
+      this._lastPowerState = pState;
 
-      if (mexeu) this._update(); else if (this._child) {
+      if (mexeu) {
+        this._update();
+      } else if (this._child) {
         this._child.hass = hass;
         this._scheduleEnforceSquare();
+        if (powerChanged) {
+          this._updatePowerFooter();
+        }
       }
     }
     get hass() { return this._hass; }
@@ -688,6 +763,119 @@
           }
         }
       }
+
+      this._updatePowerFooter();
+    }
+
+    _updatePowerFooter() {
+      if (!this._child || !this._child.shadowRoot || !this._hass || !this._config) return;
+      if (this._config.power_badge === false) return;
+
+      // Limpa qualquer resíduo anterior dentro de .tabs para não poluir
+      const oldTabBadge = this._child.shadowRoot.querySelector(".mw-tab-power-badge");
+      if (oldTabBadge) oldTabBadge.remove();
+
+      const shellEl = this._child.shadowRoot.querySelector("ha-card.shell");
+      if (!shellEl) return;
+
+      const sockSt = socketState(this._hass, this._config);
+      const isSocketOn = (sockSt === "on");
+
+      let ftr = shellEl.querySelector(".mw-power-footer");
+
+      if (!isSocketOn) {
+        if (ftr) ftr.style.display = "none";
+        return;
+      }
+
+      if (!this._child.shadowRoot.getElementById("mw-tab-power-footer-style")) {
+        const style = document.createElement("style");
+        style.id = "mw-tab-power-footer-style";
+        style.textContent = `
+          .mw-power-footer {
+            position: relative;
+            z-index: 0;
+            width: calc((100% - 2 * var(--hdr-inset, 26px)) * 2 / 3);
+            margin: calc(-1 * var(--hdr-lap, 16px)) auto 0;
+            padding: calc(var(--hdr-lap, 16px) + 8px) 16px 10px;
+            background: var(--mw-hdr, rgba(68, 68, 68, 0.65));
+            color: var(--mw-hdr-text, rgba(255, 255, 255, 0.92));
+            border-radius: 0 0 var(--pr, 22px) var(--pr, 22px);
+            display: flex;
+            align-items: baseline;
+            justify-content: center;
+            gap: 4px;
+            cursor: pointer;
+            touch-action: manipulation;
+            -webkit-tap-highlight-color: transparent;
+            user-select: none;
+            transition: transform 0.15s ease, opacity 0.2s ease;
+            box-sizing: border-box;
+          }
+          .mw-power-footer:active {
+            transform: scale(0.98);
+          }
+          .mw-power-footer[hidden] {
+            display: none !important;
+          }
+          .mw-power-footer .pv {
+            font-family: var(--mw-font, 'Graphik', sans-serif);
+            font-size: 20px;
+            font-weight: 700;
+            line-height: 1;
+            color: #f0b429;
+            letter-spacing: -0.3px;
+            font-variant-numeric: tabular-nums;
+            font-feature-settings: "tnum" 1;
+            text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+          }
+          .mw-power-footer .pu {
+            font-family: var(--mw-font, 'Graphik', sans-serif);
+            font-size: 14px;
+            font-weight: 700;
+            color: #f0b429;
+            opacity: 0.85;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            line-height: 1;
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
+          }
+        `;
+        this._child.shadowRoot.appendChild(style);
+      }
+
+      if (!ftr) {
+        ftr = document.createElement("div");
+        ftr.className = "mw-power-footer";
+        shellEl.appendChild(ftr);
+      }
+
+      ftr.style.display = "flex";
+
+      const pEnt = getPowerEntity(this._hass, this._config);
+      const st = pEnt && this._hass.states[pEnt];
+      const rawVal = st ? st.state : null;
+      const rawUnit = st?.attributes?.unit_of_measurement || "W";
+
+      const { value, unit } = fmtPower(rawVal, rawUnit, this._hass?.locale?.language);
+
+      ftr.title = pEnt ? `Potência ativa (${pEnt}): ${value} ${unit}` : "Potência ativa";
+      ftr.innerHTML = `
+        <span class="pv">${esc(value)}</span>
+        <span class="pu">${esc(unit)}</span>
+      `;
+
+      if (pEnt && !ftr._hasClick) {
+        ftr._hasClick = true;
+        ftr.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          this.dispatchEvent(new CustomEvent("hass-more-info", {
+            bubbles: true,
+            composed: true,
+            detail: { entityId: pEnt },
+          }));
+        });
+      }
     }
 
     _shell() {
@@ -727,6 +915,7 @@
       if (this._child && s === this._built) {
         this._child.hass = this._hass;
         this._scheduleEnforceSquare();
+        this._updatePowerFooter();
         return;
       }
       this._built = s;
@@ -737,6 +926,7 @@
           this._child.hass = this._hass;
           if (this._editMode !== undefined) this._child.editMode = this._editMode;
           this._scheduleEnforceSquare();
+          this._updatePowerFooter();
           return;
         } catch (_) { this._child = null; }
       }
@@ -761,6 +951,7 @@
       host.appendChild(el);
       this._child = el;
       this._scheduleEnforceSquare();
+      this._updatePowerFooter();
     }
   }
   // Os editores internos do HA não vêm carregados: só entram quando alguma
