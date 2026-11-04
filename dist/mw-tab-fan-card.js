@@ -23,7 +23,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.6.2";
+  const VERSION = "0.8.0";
   /* ------------------------------------------------------------ utilidades */
 
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
@@ -348,6 +348,282 @@
     return pEnt || "";
   };
 
+  const getVoltageEntity = (hass, cfg) => {
+    if (!hass || !hass.states) return "";
+    let vEnt = cfg.sensor_voltagem || (cfg.power_options && cfg.power_options.sensor_voltagem);
+    if (!vEnt) {
+      const s = powerSensors(hass, cfg);
+      if (s && s.sensor_voltagem) vEnt = s.sensor_voltagem;
+    }
+    if (!vEnt && cfg.socket_device && hass.devices && hass.entities) {
+      for (const [id, ent] of Object.entries(hass.entities)) {
+        if (ent.device_id === cfg.socket_device && id.startsWith("sensor.") && (id.includes("voltagem") || id.includes("tensao") || id.includes("voltage"))) {
+          vEnt = id;
+          break;
+        }
+      }
+    }
+    if (!vEnt) {
+      const sock = socketEntity(hass, cfg);
+      if (sock) {
+        const base = sock.replace(/^switch\./, "").replace(/_socket_\d+$/, "").replace(/_principal$/, "");
+        const cand1 = "sensor." + base + "_voltagem";
+        const cand2 = "sensor." + base + "_tensao";
+        if (hass.states[cand1]) vEnt = cand1;
+        else if (hass.states[cand2]) vEnt = cand2;
+      }
+    }
+    return vEnt || "";
+  };
+
+  const getCurrentEntity = (hass, cfg) => {
+    if (!hass || !hass.states) return "";
+    let cEnt = cfg.sensor_corrente || (cfg.power_options && cfg.power_options.sensor_corrente);
+    if (!cEnt) {
+      const s = powerSensors(hass, cfg);
+      if (s && s.sensor_corrente) cEnt = s.sensor_corrente;
+    }
+    if (!cEnt && cfg.socket_device && hass.devices && hass.entities) {
+      for (const [id, ent] of Object.entries(hass.entities)) {
+        if (ent.device_id === cfg.socket_device && id.startsWith("sensor.") && (id.includes("corrente") || id.includes("current"))) {
+          cEnt = id;
+          break;
+        }
+      }
+    }
+    if (!cEnt) {
+      const sock = socketEntity(hass, cfg);
+      if (sock) {
+        const base = sock.replace(/^switch\./, "").replace(/_socket_\d+$/, "").replace(/_principal$/, "");
+        const cand = "sensor." + base + "_corrente";
+        if (hass.states[cand]) cEnt = cand;
+      }
+    }
+    return cEnt || "";
+  };
+
+  const getTotalEnergyEntity = (hass, cfg) => {
+    if (!hass || !hass.states) return "";
+    let eEnt = cfg.sensor_energia || (cfg.power_options && cfg.power_options.sensor_energia);
+    if (!eEnt && cfg.socket_device && hass.devices && hass.entities) {
+      for (const [id, ent] of Object.entries(hass.entities)) {
+        if (ent.device_id === cfg.socket_device && id.startsWith("sensor.") && (id.includes("energia") || id.includes("energy"))) {
+          eEnt = id;
+          break;
+        }
+      }
+    }
+    if (!eEnt) {
+      const sock = socketEntity(hass, cfg);
+      if (sock) {
+        const base = sock.replace(/^switch\./, "").replace(/_socket_\d+$/, "").replace(/_principal$/, "");
+        const cand = "sensor." + base + "_energia_total";
+        if (hass.states[cand]) eEnt = cand;
+      }
+    }
+    return eEnt || "";
+  };
+
+  const buildAdminTabs = (hass, cfg, meta) => {
+    const isAdmin = Boolean(hass && hass.user && hass.user.is_admin);
+    if (!isAdmin) return [];
+
+    const sockEnt = socketEntity(hass, cfg);
+    const sockObj = sockEnt && hass.states ? hass.states[sockEnt] : null;
+    const sockAttrs = (sockObj && sockObj.attributes) || {};
+    const sockState = sockObj ? sockObj.state : "desconhecido";
+
+    const pEnt = getPowerEntity(hass, cfg);
+    const pObj = pEnt && hass.states ? hass.states[pEnt] : null;
+    const pVal = pObj ? `${pObj.state} ${pObj.attributes?.unit_of_measurement || "W"}` : "—";
+
+    const vEnt = getVoltageEntity(hass, cfg);
+    const vObj = vEnt && hass.states ? hass.states[vEnt] : null;
+    const vVal = vObj ? `${vObj.state} ${vObj.attributes?.unit_of_measurement || "V"}` : "—";
+
+    const cEnt = getCurrentEntity(hass, cfg);
+    const cObj = cEnt && hass.states ? hass.states[cEnt] : null;
+    const cVal = cObj ? `${cObj.state} ${cObj.attributes?.unit_of_measurement || "A"}` : "—";
+
+    const eEnt = getTotalEnergyEntity(hass, cfg);
+    const eObj = eEnt && hass.states ? hass.states[eEnt] : null;
+    const eVal = eObj ? `${eObj.state} ${eObj.attributes?.unit_of_measurement || "kWh"}` : "—";
+
+    const localIp = sockAttrs.local_ip || "192.168.2.x";
+    const connMode = sockAttrs.connection_mode || "hybrid_local_first";
+    const devId = sockAttrs.tuya_device_id || cfg.device || cfg.socket_device || "—";
+    const appName = meta.title || "Aparelho";
+    const appEnt = meta.entity || "—";
+    const appType = meta.type || "Aparelho Inteligente";
+
+    const infoMarkdown = `| Parâmetro | Valor |
+| :--- | :--- |
+| **Aparelho** | **${appName}** |
+| **Entidade** | \`${appEnt}\` |
+| **Tomada** | \`${sockEnt || "Não configurada"}\` |
+| **Status** | ${sockState === "on" ? "🟢 **LIGADA**" : (sockState === "off" ? "🔴 **DESLIGADA**" : `**${sockState.toUpperCase()}**`)} |
+| **Potência** | \`${pVal}\` |
+| **Tensão** | \`${vVal}\` |
+| **Corrente** | \`${cVal}\` |
+| **Consumo** | \`${eVal}\` |
+| **IP Local** | \`${localIp}\` |
+| **Protocolo** | \`${connMode}\` |
+| **Tuya ID** | \`${devId}\` |
+| **Soberania** | 🔒 \`NO-NET\` (Air-Gapped) |
+`;
+
+    const tabDevices = {
+      label: "DISPOSITIVOS",
+      icon: "mdi:devices",
+      cards: [
+        {
+          type: "markdown",
+          card_mod: {
+            style: `ha-card {
+  background: rgba(0, 0, 0, 0.40) !important;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px !important;
+  padding: 8px 12px !important;
+  max-height: 290px !important;
+  overflow-y: auto !important;
+  box-sizing: border-box !important;
+  --primary-text-color: #f5f5f5;
+}
+table {
+  width: 100% !important;
+  font-size: 11px !important;
+  border-collapse: collapse !important;
+}
+th, td {
+  padding: 4px 6px !important;
+  line-height: 1.3 !important;
+}`,
+          },
+          content: infoMarkdown,
+        },
+      ],
+    };
+
+    // 2. Tab AUTOMAÇÕES
+    let automations = Array.isArray(cfg.automations) ? [...cfg.automations] : [];
+    if (!automations.length && hass.states) {
+      const terms = meta.automationTerms || [];
+      const entBases = [sockEnt, meta.entity].filter(Boolean).map((e) => e.split(".").pop().toLowerCase());
+      for (const key of Object.keys(hass.states)) {
+        if (!key.startsWith("automation.")) continue;
+        const low = key.toLowerCase();
+        const fn = (hass.states[key].attributes?.friendly_name || "").toLowerCase();
+        let match = terms.some((t) => low.includes(t.toLowerCase()) || fn.includes(t.toLowerCase()));
+        if (!match) {
+          match = entBases.some((b) => b.length > 4 && (low.includes(b) || fn.includes(b)));
+        }
+        if (match && !automations.includes(key)) automations.push(key);
+      }
+    }
+
+    const autoCards = [];
+    if (automations.length > 0) {
+      autoCards.push({
+        type: "entities",
+        title: `Automações (${appName})`,
+        show_header_toggle: false,
+        state_color: true,
+        card_mod: {
+          style: `ha-card {
+  background: rgba(0, 0, 0, 0.40) !important;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px !important;
+  max-height: 290px !important;
+  overflow-y: auto !important;
+  box-sizing: border-box !important;
+}`,
+        },
+        entities: automations.map((id) => ({
+          entity: id,
+          secondary_info: "last-changed",
+        })),
+      });
+    } else {
+      autoCards.push({
+        type: "markdown",
+        card_mod: {
+          style: `ha-card {
+  background: rgba(0, 0, 0, 0.40) !important;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px !important;
+  padding: 14px !important;
+  max-height: 290px !important;
+  overflow-y: auto !important;
+  box-sizing: border-box !important;
+}`,
+        },
+        content: `### 🤖 Automações Vinculadas\n\nNenhuma automação vinculada encontrada especificamente para **${appName}** no momento.\n\n*Automações criadas no Home Assistant com o nome deste dispositivo aparecerão aqui automaticamente.*`,
+      });
+    }
+
+    const tabAutomations = {
+      label: "AUTOMAÇÕES",
+      icon: "mdi:robot",
+      cards: autoCards,
+    };
+
+    // 3. Tab ATIVIDADES
+    const logEntities = new Set();
+    if (sockEnt) logEntities.add(sockEnt);
+    if (pEnt) logEntities.add(pEnt);
+    if (vEnt) logEntities.add(vEnt);
+    if (cEnt) logEntities.add(cEnt);
+    if (meta.entity && meta.entity !== "—") logEntities.add(meta.entity);
+    if (Array.isArray(meta.extraLogEntities)) {
+      for (const e of meta.extraLogEntities) if (e && e !== "—") logEntities.add(e);
+    }
+    if (Array.isArray(cfg.buttons)) {
+      for (const b of cfg.buttons) if (b && b.entity) logEntities.add(b.entity);
+    }
+    if (Array.isArray(cfg.log_entities)) {
+      for (const e of cfg.log_entities) if (e) logEntities.add(e);
+    }
+    for (const a of automations) logEntities.add(a);
+
+    const logList = Array.from(logEntities).filter(Boolean);
+
+    const tabActivity = {
+      label: "ATIVIDADES",
+      icon: "mdi:history",
+      cards: [
+        {
+          type: "logbook",
+          title: `Atividades (${appName})`,
+          hours_to_show: 24,
+          entities: logList,
+          target: { entity_id: logList },
+          card_mod: {
+            style: `ha-card {
+  background: rgba(0, 0, 0, 0.40) !important;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px !important;
+  max-height: 290px !important;
+  overflow-y: auto !important;
+  box-sizing: border-box !important;
+  --primary-text-color: #f5f5f5;
+  --secondary-text-color: #d6d6d6;
+}`,
+          },
+        },
+      ],
+    };
+
+    return [tabDevices, tabAutomations, tabActivity];
+  };
+
   const STEPS = [["W", "kW"], ["kW", "MW"], ["MW", "GW"]];
   const fmtPower = (raw, unit, lang) => {
     let v = Number.parseFloat(raw);
@@ -574,6 +850,19 @@
       tabs.push(deepMerge({ label: t2.label, icon: t2.icon, cards: ecards }, (cfg.tabs_yaml || {}).energy || {}));
     }
 
+    const meta = {
+      title: "Climatizador",
+      entity: cfg.fan_entity || fanEntity(hass, cfg) || "fan.climatizador_escritorio",
+      type: "Climatizador / Ventilador",
+      automationTerms: ["climatizador", "ventilador", "fan"],
+      extraLogEntities: [
+        fanEntity(hass, cfg),
+        ...(cfg.buttons || []).map((b) => b.entity),
+      ],
+    };
+    const adminTabs = buildAdminTabs(hass, cfg, meta);
+    for (const at of adminTabs) tabs.push(at);
+
     for (const t of (Array.isArray(cfg.extra_tabs) ? cfg.extra_tabs : [])) tabs.push(t);
 
     const root = {
@@ -621,6 +910,7 @@
         || antes.entities !== hass.entities
         || antes.devices !== hass.devices
         || antes.areas !== hass.areas
+        || Boolean(antes.user && antes.user.is_admin) !== Boolean(hass.user && hass.user.is_admin)
         || Object.keys(antes.states || {}).length !== Object.keys(hass.states || {}).length
         || sockSt !== this._lastSockState
         || fanSt !== this._lastFanState;
