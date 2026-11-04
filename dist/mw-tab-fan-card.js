@@ -23,7 +23,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.8.1";
+  const VERSION = "0.8.2";
   /* ------------------------------------------------------------ utilidades */
 
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
@@ -748,12 +748,14 @@ th, td {
 
     const sockEnt = socketEntity(hass, cfg);
     const sockSt = socketState(hass, cfg);
+    const fanSt = fanStatus(hass, cfg);
     const isSocketOff = Boolean(sockEnt && (sockSt === "off" || sockSt === "unavailable" || sockSt === "unknown"));
+    const isFanOff = isSocketOff || fanSt === "off" || fanSt === "unavailable" || fanSt === "unknown";
 
     let paperColor = "orange-7";
     if (!sockEnt || sockSt === "unavailable" || sockSt === "unknown") {
       paperColor = "#a5123f";
-    } else if (sockSt === "off") {
+    } else if (isFanOff) {
       paperColor = "grafite-1";
     } else {
       paperColor = "orange-7";
